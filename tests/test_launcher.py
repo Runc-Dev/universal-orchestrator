@@ -133,11 +133,55 @@ if '--output-last-message' in sys.argv:
         self.assertFalse((self.tree / '.agents').exists())
         result = subprocess.run([sys.executable, str(install), '--project', str(self.tree)], capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        for host in ('.agents', '.claude'):
-            copied = self.tree / host / 'skills/universal-orchestrator/SKILL.md'
-            self.assertEqual(copied.read_bytes(), (ROOT / 'universal-orchestrator/SKILL.md').read_bytes())
+        original = (ROOT / 'universal-orchestrator/SKILL.md').read_text(encoding='utf-8')
+        codex_copy = (self.tree / '.agents/skills/universal-orchestrator/SKILL.md').read_text(encoding='utf-8')
+        claude_copy = (self.tree / '.claude/skills/universal-orchestrator/SKILL.md').read_text(encoding='utf-8')
+        self.assertEqual(codex_copy, original)
+        frontmatter = claude_copy.split('\n---', 1)[0]
+        self.assertIn('disable-model-invocation: true', frontmatter)
+        self.assertEqual(claude_copy.replace('disable-model-invocation: true\n', ''), original)
         result = subprocess.run([sys.executable, str(install), '--project', str(self.tree)], capture_output=True)
         self.assertEqual(result.returncode, 2)
+
+    def test_installer_upgrade_backs_up_outside_skill_dirs(self):
+        install = ROOT / 'install-skill.py'
+        old = self.tree / '.claude/skills/universal-orchestrator'
+        old.mkdir(parents=True)
+        (old / 'SKILL.md').write_text('---\nname: universal-orchestrator\ndescription: v1\n---\nold', encoding='utf-8')
+        result = subprocess.run([sys.executable, str(install), '--project', str(self.tree), '--upgrade'], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('v2', (old / 'SKILL.md').read_text(encoding='utf-8'))
+        backups = list((self.tree / '.skill-backups').iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertEqual((backups[0] / 'SKILL.md').read_text(encoding='utf-8')[-3:], 'old')
+
+    def test_agy_auto_prefers_argon_then_falls_back(self):
+        listing = 'Available models:\n  gemini-3.8-flash-low   fast\n  gemini-4-argon-low\n  gemini-4-argon-high (default)\n'
+        models = launcher.parse_agy_models(listing)
+        self.assertEqual(models, ['gemini-3.8-flash-low', 'gemini-4-argon-low', 'gemini-4-argon-high'])
+        self.assertEqual(launcher.pick_agy_model('scout', models)[0], 'gemini-4-argon-low')
+        self.assertEqual(launcher.pick_agy_model('reviewer', models)[0], 'gemini-4-argon-high')
+        no_argon = ['gemini-3.8-flash-low', 'gemini-3.8-flash-high']
+        self.assertEqual(launcher.pick_agy_model('scout', no_argon)[0], 'gemini-3.8-flash-low')
+        with self.assertRaises(ValueError):
+            launcher.pick_agy_model('reviewer', no_argon)
+
+    def test_answer_extracted_from_json_output(self):
+        stdout = '{"type":"progress"}\n{"type":"result","result":"Kısa yanıt"}\n'
+        self.assertEqual(launcher.extract_answer('claude', stdout), 'Kısa yanıt')
+        self.assertEqual(launcher.extract_answer('agy', 'plain text'), 'plain text')
+        self.assertIsNone(launcher.extract_answer('codex', 'ignored'))
+
+    def test_reviewer_auto_model_runs_read_only(self):
+        with patch.object(launcher, 'agy_models', return_value=['gemini-4-argon-high']):
+            self.assertEqual(self.invoke(self.args(role='reviewer')), 0)
+        request = json.loads((self.output / 'request.json').read_text(encoding='utf-8'))
+        self.assertEqual(request['requested_model'], 'gemini-4-argon-high')
+        self.assertEqual(request['model_selection']['mode'], 'auto')
+        self.assertIn('--mode', request['arguments'])
+        data = json.loads((self.output / 'stdout.log').read_text(encoding='utf-8-sig'))
+        self.assertIn('WORKFLOW_ROLE=advisor', data['stdin'])
+        self.assertTrue((self.output / 'answer.txt').exists())
 
 
 if __name__ == '__main__':

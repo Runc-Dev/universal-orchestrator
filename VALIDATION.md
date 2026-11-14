@@ -1,4 +1,17 @@
-# Doğrulama kaydı — 14.11.2026
+# Doğrulama kaydı
+
+## v2.0.0 — 14.11.2026
+
+`python -m unittest discover -s tests` Linux'ta (Python 3) 13/13 geçti. Yeni testler:
+
+10. Kurucunun Claude kopyasına `disable-model-invocation: true` eklemesi, Codex kopyasını değiştirmemesi.
+11. `--upgrade` ile eski kurulumun skill dizini dışına (`.skill-backups/`) yedeklenmesi.
+12. agy otomatik seçim: Argon varken Argon, yokken Flash; reviewer için uygun model yoksa engellenmesi.
+13. Claude/agy JSON çıktısından son yanıtın ayıklanması; reviewer rolünün salt okuma kipiyle çalışması.
+
+Doğrulanmayanlar: gerçek `agy models` çıktısının biçimi (ayrıştırıcı her satırın ilk model kimliği biçimindeki kelimesini alır) ve Argon'un agy'deki tam model kimliği. Gerçek model çağrısı, canlı kota ve Windows/macOS'ta v2 çalıştırması yapılmadı. İlk kullanımda `run_agent.py doctor` çıktısındaki `auto_selection` alanını kontrol et.
+
+## v1.0.0 — 14.11.2026
 
 Skill Creator `quick_validate.py`: başarılı.
 

@@ -16,13 +16,24 @@ import tempfile
 import time
 
 
+__version__ = '2.0.0'
+
 ROLES = {
     'planner': ('claude', 'claude-opus-5-5', (2, 1, 280)),
     'coder': ('codex', 'gpt-6.1-sol', None),
-    'scout': ('agy', 'gemini-3.8-flash-low', None),
+    'scout': ('agy', 'auto', None),
+    'reviewer': ('agy', 'auto', None),
     'advisor': ('claude', 'claude-fable-5-2', (2, 1, 321)),
     'helper': ('claude', 'claude-sonnet-5-5', (2, 1, 284)),
 }
+
+# Ordered preferences matched against `agy models` output; the first pattern with a hit wins.
+AGY_PREFERENCES = {
+    'scout': [r'argon.*(minimal|low)', r'flash.*low', r'flash'],
+    'reviewer': [r'argon.*(high|medium)', r'argon', r'pro.*(high|medium)'],
+}
+MODEL_TOKEN = re.compile(r'[A-Za-z][A-Za-z0-9]*(?:[-._][A-Za-z0-9]+)+')
+PREVIEW_CHARS = 1500
 
 
 def utc_now():
@@ -107,8 +118,59 @@ def version_info(name):
     return executable, tuple(map(int, match.groups())), output
 
 
+def parse_agy_models(text):
+    """Return model ids in listing order: the first id-shaped token of each line."""
+    models = []
+    for line in text.splitlines():
+        match = MODEL_TOKEN.search(line)
+        if match and match.group(0) not in models:
+            models.append(match.group(0))
+    return models
+
+
+def pick_agy_model(role, available):
+    for pattern in AGY_PREFERENCES[role]:
+        for model in available:
+            if re.search(pattern, model, re.IGNORECASE):
+                return model, pattern
+    raise ValueError(f'{role}: no preferred agy model in `agy models` '
+                     f'({", ".join(available) or "empty"}); pass --model explicitly')
+
+
+def agy_models(executable):
+    with tempfile.TemporaryDirectory(prefix='orchestrator-probe-') as temp:
+        command, _ = launch_command(executable, ['models'], Path.cwd(), None, Path(temp))
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, **process_options())
+        try:
+            stdout, stderr = process.communicate(timeout=30)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            stop_tree(process)
+            raise ValueError('agy models: interrupted or timed out')
+    if process.returncode:
+        raise ValueError('agy models failed: ' + (stdout + stderr).decode('utf-8', 'replace')[:500])
+    return parse_agy_models(stdout.decode('utf-8', errors='replace'))
+
+
+def extract_answer(cli, stdout_text):
+    """Final message only, so the orchestrator never has to read raw JSON logs."""
+    if cli == 'codex':
+        return None  # Codex writes answer.txt itself via --output-last-message.
+    candidates = [stdout_text.strip()] + stdout_text.strip().splitlines()[::-1]
+    for chunk in candidates:
+        try:
+            data = json.loads(chunk)
+        except ValueError:
+            continue
+        if isinstance(data, dict):
+            for key in ('result', 'response', 'text', 'output'):
+                if isinstance(data.get(key), str):
+                    return data[key]
+    return stdout_text
+
+
 def doctor():
-    report = {'checked_at': utc_now(), 'quota_status': 'unknown', 'clis': {}}
+    report = {'version': __version__, 'checked_at': utc_now(), 'quota_status': 'unknown', 'clis': {}}
     for name in ('codex', 'claude', 'agy'):
         try:
             executable, version, output = version_info(name)
@@ -118,6 +180,18 @@ def doctor():
                     role: version >= minimum for role, (cli, _, minimum) in ROLES.items()
                     if cli == 'claude'
                 }
+            if name == 'agy':
+                try:
+                    available = agy_models(executable)
+                    entry['models'] = available
+                    entry['auto_selection'] = {}
+                    for role in AGY_PREFERENCES:
+                        try:
+                            entry['auto_selection'][role] = pick_agy_model(role, available)[0]
+                        except ValueError as error:
+                            entry['auto_selection'][role] = {'error': str(error)}
+                except (ValueError, OSError) as error:
+                    entry['models_error'] = str(error)
             report['clis'][name] = entry
         except (ValueError, OSError) as error:
             report['clis'][name] = {'error': str(error)}
@@ -131,13 +205,13 @@ def doctor():
 def configuration(args):
     cli, model, minimum = ROLES[args.role]
     if args.model:
-        if args.role == 'scout':
+        if cli == 'agy':
             if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]*', args.model):
-                raise ValueError('Invalid scout model identifier')
+                raise ValueError('Invalid agy model identifier')
         elif args.role == 'helper' and args.model in ('claude-sonnet-5-5', 'claude-opus-5-5'):
             minimum = (2, 1, 280) if args.model == 'claude-opus-5-5' else (2, 1, 284)
         else:
-            raise ValueError('Only scout/helper models may change; planner/coder/advisor are pinned')
+            raise ValueError('Only scout/reviewer/helper models may change; planner/coder/advisor are pinned')
         model = args.model
     if not 0 < args.timeout <= 86400:
         raise ValueError('timeout must be between 1 and 86400 seconds')
@@ -151,9 +225,12 @@ def cli_arguments(cli, model, output, args):
         return ['exec', '--model', model, '--sandbox', 'workspace-write', '--json',
                 '--output-last-message', str(output / 'answer.txt'), '-']
     if cli == 'agy':
+        instruction = ('Review the change described on stdin. Do not change any files.'
+                       if args.role == 'reviewer' else
+                       'Complete the task supplied on stdin. Do not change source files.')
         return ['--model', model, '--mode', 'plan', '--disable-slash-commands',
                 '--output-format', 'json', '--print-timeout', f'{args.timeout}s',
-                '--print', 'Complete the task supplied on stdin. Do not change source files.']
+                '--print', instruction]
     result = ['--model', model, '--tools', '', '--strict-mcp-config', '--mcp-config',
               '{"mcpServers":{}}', '--disable-slash-commands', '--output-format', 'json',
               '--print', 'Use only the supplied context. Return analysis or decisions, never code or patches.']
@@ -177,8 +254,14 @@ def run_agent(args):
     if output.exists():
         raise ValueError('out already exists; use a unique directory for each invocation')
     executable, version, version_text = version_info(cli)
+    selection = None
+    if model == 'auto':
+        available = agy_models(executable)
+        model, pattern = pick_agy_model(args.role, available)
+        selection = {'mode': 'auto', 'matched_preference': pattern, 'available': available}
     arguments = cli_arguments(cli, model, output, args)
-    request = {'role': args.role, 'cli': cli, 'requested_model': model,
+    request = {'launcher_version': __version__, 'role': args.role, 'cli': cli,
+               'requested_model': model, 'model_selection': selection,
                'cli_version': version_text, 'executable': executable, 'arguments': arguments,
                'worktree': str(worktree), 'out': str(output), 'timeout_seconds': args.timeout,
                'version_compatible': minimum is None or version >= minimum,
@@ -190,7 +273,7 @@ def run_agent(args):
         raise ValueError(f'{model} needs {cli} >= {request["minimum_version"]}; found {version_text}')
     output.mkdir(parents=True, exist_ok=False)
     save_json(output / 'request.json', request)
-    marker = 'advisor' if args.role in ('planner', 'advisor', 'helper') else 'worker'
+    marker = 'advisor' if args.role in ('planner', 'advisor', 'helper', 'reviewer') else 'worker'
     policy = (f'WORKFLOW_ROLE={marker}\nAssigned role: {args.role}. Do not spawn other agents.\n'
               'Do not change files, produce code or patches.\n' if marker == 'advisor' else
               'WORKFLOW_ROLE=worker\nDo not spawn other agents. Follow the assigned file scope.\n')
@@ -228,12 +311,24 @@ def run_agent(args):
         record.update(exit_code=exit_code, finished_at=utc_now(),
                       elapsed_seconds=round(time.monotonic() - started, 2))
         save_json(output / 'result.json', record)
-    print(json.dumps({'out': str(output), **record}, ensure_ascii=False, indent=2))
+    answer_file = output / 'answer.txt'
+    try:
+        if not answer_file.exists() and (output / 'stdout.log').exists():
+            answer = extract_answer(cli, (output / 'stdout.log').read_text(encoding='utf-8-sig', errors='replace'))
+            if answer is not None:
+                answer_file.write_text(answer, encoding='utf-8')
+        answer = answer_file.read_text(encoding='utf-8', errors='replace') if answer_file.exists() else ''
+    except OSError:
+        answer = ''
+    summary = {'out': str(output), 'role': args.role, 'model': model, **record,
+               'answer_chars': len(answer), 'answer_preview': answer[:PREVIEW_CHARS]}
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
     return exit_code if 0 <= exit_code <= 255 else 1
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--version', action='version', version=f'universal-orchestrator {__version__}')
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('doctor', help='Check installed versions without a model request')
     run = commands.add_parser('run', help='Run one bounded worker in an existing worktree')
