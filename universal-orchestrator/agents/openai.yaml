@@ -1,0 +1,4 @@
+interface:
+  display_name: "Universal Orchestrator"
+  short_description: "Opus plans; Codex builds; Fable advises"
+  default_prompt: "Use $universal-orchestrator to plan this task with Opus, delegate implementation to Codex, and coordinate isolated workers."
