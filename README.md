@@ -1,8 +1,10 @@
 # Universal Orchestrator
 
-A shared skill for **Codex and Claude Code**: Opus 5.5 plans, Codex GPT-6.1 Sol implements, agy handles simple research and checks, and Fable 5.2 advises. Workers use separate Git worktrees with quota-aware concurrency.
+**Sürüm 2.0.0** · [Değişiklik kaydı](CHANGELOG.md)
 
-Ortak bir skill ile **Opus planlasın, Codex kodlasın, Fable danışman olsun**. Claude modellerine uygulama veya test kodu yazdırmadan, bağımsız işleri ayrı worktree'lerde paralel yürütün.
+A shared skill for **Codex and Claude Code**: Opus 5.5 plans, Codex GPT-6.1 Sol implements, agy (Gemini 4 Argon / Flash) scouts and reviews, and Fable 5.2 advises. Workers use separate Git worktrees with quota-aware concurrency.
+
+Ortak bir skill ile **Opus planlasın, Codex kodlasın, agy Argon incelesin, Fable danışman olsun**. Claude modellerine uygulama veya test kodu yazdırmadan, bağımsız işleri ayrı worktree'lerde paralel yürütün.
 
 ## Roller
 
@@ -10,11 +12,21 @@ Ortak bir skill ile **Opus planlasın, Codex kodlasın, Fable danışman olsun**
 | --- | --- | --- |
 | Orkestratör | Claude / `claude-opus-5-5` | Planlama, görev dağıtımı, bağımlılıklar ve sonuç değerlendirme |
 | Kodlama işçisi | Codex / `gpt-6.1-sol` | Kod, test, refactor, hata ve conflict düzeltme |
-| Basit işçi | agy / `gemini-3.8-flash-low` | Salt okuma keşif, araştırma, mevcut testleri çalıştırma ve log özeti |
+| Keşif (scout) | agy / `auto`: Argon low/minimal, yoksa Flash low | Salt okuma keşif, repo haritası, test çalıştırma, log özeti |
+| İnceleme (reviewer) | agy / `auto`: Argon high/medium | Salt okuma diff incelemesi ve kabul kontrolü |
 | Advisor | Claude / `claude-fable-5-2` | Gerektiğinde araçsız mimari ve risk değerlendirmesi |
 | Ek analiz yardımcısı | Sonnet 5.5 veya Opus 5.5 | Yeterli kota ve bağımsız iş varsa en fazla 1–2 yardımcı |
 
-agy model listesi hesaba göre değişebilir; her workflow başında `agy models` ile kontrol edilir. Coder, planner ve advisor modelleri sabittir; erişim olmadığında başka modele sessizce geçilmez.
+agy modelleri `agy models` listesinden otomatik seçilir; Argon hesabında yoksa Flash'a düşer ve bu seçim kayda geçer. Coder, planner ve advisor modelleri sabittir; erişim olmadığında başka modele sessizce geçilmez.
+
+## v2'de token tasarrufu
+
+- `SKILL.md` ~11 KB'tan ~4 KB'a indi; Git, kota, prompt ve durum ayrıntıları ayrı referanslarda, yalnız gerektiğinde okunur.
+- **Küçük iş kapısı:** tek dosyalık işlerde orkestrasyon açılmaz.
+- **Repo haritası:** scout bir kez `repo-map.md` üretir (Obsidian uyumlu wikilink'lerle); sonraki koşular yalnız değişen modülleri günceller.
+- **`state.json`:** orkestratör sohbet geçmişi yerine kısa durum dosyasını okur.
+- **`answer_preview`:** betik yalnız işçinin son yanıtını kısaltılmış yazdırır; ham JSON loglar okunmaz.
+- **Reviewer:** diff incelemesi Opus yerine agy Argon'da yapılır.
 
 ## İndir ve kur
 
@@ -40,7 +52,9 @@ YOUR_PROJECT_PATH/
   .claude/skills/universal-orchestrator/    # Claude Code
 ```
 
-Mevcut skill kurulumunun üzerine yazılmaz. Kurucu yalnız proje içine dosya kopyalar; CLI kurmaz, hesaplara giriş yapmaz veya model çağırmaz.
+Mevcut skill kurulumunun üzerine yazılmaz. v1'den yükseltmek için `--upgrade` ekle; eski kopya `YOUR_PROJECT_PATH/.skill-backups/` altına taşınır. Kurucu yalnız proje içine dosya kopyalar; CLI kurmaz, hesaplara giriş yapmaz veya model çağırmaz.
+
+Claude Code kopyasına `disable-model-invocation: true` eklenir: skill yalnız `/universal-orchestrator` yazdığında yüklenir, Claude onu kendiliğinden devreye sokmaz. Elle kurulumda bu satırı Claude kopyasının frontmatter'ına kendin ekle.
 
 Tüm projeler için elle kurulum: `universal-orchestrator/` klasörünü Codex'in etkin kullanıcı skill dizinine (güncel varsayılan `~/.agents/skills/`) ve Claude'un etkin kullanıcı skill dizinine (`~/.claude/skills/`) kopyala. Özel/eski Codex ortamında `~/.codex/skills/` kullanılıyor olabilir; aynı skill'i birden çok keşfedilen dizine kurma. [Codex skill dizinleri](https://learn.chatgpt.com/docs/build-skills), [Claude skill dizinleri](https://code.claude.com/docs/en/skills).
 
@@ -102,12 +116,15 @@ Varsayılan üst sınır aynı anda 3 dış CLI işçisidir. Limit azaldıkça p
 python -m unittest discover -s tests -v
 ```
 
-Windows'ta gerçek yerel süreçlerle 9 test geçti: argüman/stdin aktarımı, kayıtların korunması, sabit model rolleri, sürüm kontrolü, timeout ve alt süreçlerin durdurulması, iki host'a kurulum. Testler yapay CLI kullanır; model çağrısı yapmaz.
+v2'de 13 test Linux'ta geçti (v1'in 9 testi Windows'ta da geçmişti): argüman/stdin aktarımı, kayıtların korunması, sabit model rolleri, sürüm kontrolü, timeout ve alt süreçlerin durdurulması, iki host'a kurulum ve yükseltme, agy otomatik model seçimi, yanıt ayıklama. Testler yapay CLI kullanır; model çağrısı yapmaz.
 
-Tam modeller arası workflow ve canlı kota sorgusu bu sürümde uçtan uca doğrulanmadı. Linux/macOS yolu uygulanmıştır; bu platformlarda çalıştırma doğrulanmamıştır. Ayrıntılar: [VALIDATION.md](VALIDATION.md).
+Tam modeller arası workflow ve canlı kota sorgusu bu sürümde uçtan uca doğrulanmadı. v2 Windows ve macOS'ta henüz çalıştırılmadı. Ayrıntılar: [VALIDATION.md](VALIDATION.md).
 
 - [Ortak skill](universal-orchestrator/SKILL.md)
-- [CLI örnekleri ve görev sözleşmesi](universal-orchestrator/references/workflow.md)
+- [Roller, agy model seçimi ve kota](universal-orchestrator/references/roles-and-quota.md)
+- [Repo haritası ve durum dosyası](universal-orchestrator/references/state-and-map.md)
+- [Worktree ve entegrasyon](universal-orchestrator/references/git.md)
+- [İşçi prompt şablonları](universal-orchestrator/references/prompts.md)
 
 ## Lisans
 
